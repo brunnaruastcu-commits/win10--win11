@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Tracker — Atualização de Equipamentos</title>
+
+<!-- Firebase SDK -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, collection, doc,
+    onSnapshot, addDoc, updateDoc, deleteDoc, setDoc
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  // =====================================================
+  //  🔧 SUBSTITUA AQUI pelas suas credenciais Firebase
+  // =====================================================
+  const firebaseConfig = {
+    apiKey:            "SUA_API_KEY",
+    authDomain:        "SEU_PROJETO.firebaseapp.com",
+    projectId:         "SEU_PROJETO",
+    storageBucket:     "SEU_PROJETO.appspot.com",
+    messagingSenderId: "SEU_SENDER_ID",
+    appId:             "SEU_APP_ID"
+  };
+  // =====================================================
+
+  const app = initializeApp(firebaseConfig);
+  const db  = getFirestore(app);
+  const COL = "equipamentos";
+
+  const TASKS = [
+    { key: 'warned', label: '⚠ Usuário avisado sobre backup' },
+    { key: 'win11',  label: 'Windows 11 atualizado' },
+    { key: 'intune', label: 'Verificado no Intune' },
+    { key: 'winget', label: 'winget update --all executado' },
+  ];
+
+  const STATUS_MAP = {
+    pending:  { cls: 'badge-pending',  label: 'Pendente' },
+    progress: { cls: 'badge-progress', label: 'Em andamento' },
+    done:     { cls: 'badge-done',     label: 'Concluído' },
+    failed:   { cls: 'badge-failed',   label: 'Com falha' },
+  };
+
+  const SEED = [
+    { type:'notebook', name:'E-122301', user:'Patrícia Cursino Suares',      setor:'SETID / DIAMB / SINAP', brand:'Positivo', model:'Master Eleva N8340', os:'Windows 10', managedBy:'Unknown', lastUpdate:'',           exposure:'',     firstContact:'', checks:{}, status:'pending', notes:'' },
+    { type:'notebook', name:'E-103730', user:'Ernani Avelar Borborema',      setor:'SETID / DIREC / SESUC', brand:'HP',       model:'EliteBook 840 G3',   os:'Windows 10', managedBy:'Intune',   lastUpdate:'05/05/2026', exposure:'High', firstContact:'', checks:{}, status:'pending', notes:'' },
+    { type:'notebook', name:'E-121589', user:'Anderson Rodrigues Moreira',   setor:'SETID / DIAMB / SINAP', brand:'Positivo', model:'Master Eleva N8340', os:'Windows 10', managedBy:'Intune',   lastUpdate:'15/05/2026', exposure:'High', firstContact:'', checks:{}, status:'pending', notes:'' },
+    { type:'notebook', name:'E-121199', user:'Fábio Alcides de Souza',       setor:'SETID / DIREC / SESUC', brand:'Positivo', model:'Master Eleva N8340', os:'Windows 10', managedBy:'Intune',   lastUpdate:'03/05/2026', exposure:'High', firstContact:'', checks:{}, status:'pending', notes:'' },
+    { type:'notebook', name:'E-121248', user:'Florislicia Oliveira Sales',   setor:'SETID / DIREC / SEATE', brand:'Positivo', model:'Master Eleva N8340', os:'Windows 10', managedBy:'Intune',   lastUpdate:'04/05/2026', exposure:'High', firstContact:'', checks:{}, status:'pending', notes:'' },
+    { type:'notebook', name:'E-121215', user:'José Carlos Correia de Souza', setor:'SETID / DIREC / SESUC', brand:'Positivo', model:'Master Eleva N8340', os:'Windows 10', managedBy:'Intune',   lastUpdate:'15/05/2026', exposure:'High', firstContact:'', checks:{}, status:'pending', notes:'' },
+  ];
+
+  // Estado global
+  let devices = [];
+  let activeFilter = 'all';
+  let selectedType = 'notebook';
+  let seeded = false;
+
+  // ── Firestore: escuta em tempo real ──────────────────
+  onSnapshot(collection(db, COL), async (snap) => {
+    if (snap.empty && !seeded) {
+      seeded = true;
+      setStatus('Populando dados iniciais...');
+      for (const d of SEED) await addDoc(collection(db, COL), d);
+      return;
+    }
+    devices = snap.docs.map(d => ({ _id: d.id, ...d.data() }));
+    hideStatus();
+    render();
+  });
+
+  // ── CRUD ─────────────────────────────────────────────
+  async function addDevice() {
+    const name = document.getElementById('f_name').value.trim();
+    const user = document.getElementById('f_user').value.trim();
+    if (!name || !user) { alert('Patrimônio e nome do usuário são obrigatórios.'); return; }
+    const lastUpdateISO = document.getElementById('f_lastupdate').value;
+    const contactISO    = document.getElementById('f_contact').value;
+    const data = {
+      type:         selectedType,
+      name, user,
+      setor:        document.getElementById('f_setor').value.trim(),
+      brand:        document.getElementById('f_brand').value.trim(),
+      model:        document.getElementById('f_model').value.trim(),
+      os:           document.getElementById('f_os').value,
+      managedBy:    document.getElementById('f_managed').value,
+      exposure:     document.getElementById('f_exposure').value,
+      lastUpdate:   lastUpdateISO ? fromISO(lastUpdateISO) : '',
+      firstContact: contactISO   ? fromISO(contactISO)    : '',
+      checks: {}, status: 'pending',
+      notes: document.getElementById('f_notes').value.trim(),
+    };
+    await addDoc(collection(db, COL), data);
+    closeModal();
+  }
+
+  async function removeDevice(id) {
+    if (!confirm('Remover este equipamento?')) return;
+    await deleteDoc(doc(db, COL, id));
+  }
+
+  async function toggleCheck(id, key) {
+    const d = devices.find(d => d._id === id);
+    const checks = { ...(d.checks||{}) };
+    checks[key] = !checks[key];
+    const done = TASKS.every(t => checks[t.key]);
+    const any  = TASKS.some(t => checks[t.key]);
+    const status = done ? 'done' : any ? 'progress' : 'pending';
+    await updateDoc(doc(db, COL, id), { checks, status });
+  }
+
+  async function setDeviceStatus(id, val) {
+    await updateDoc(doc(db, COL, id), { status: val });
+  }
+
+  async function saveNotes(id, val) {
+    await updateDoc(doc(db, COL, id), { notes: val });
+  }
+
+  async function setContact(id, val) {
+    await updateDoc(doc(db, COL, id), { firstContact: fromISO(val) });
+  }
+
+  // ── Filtros e busca ───────────────────────────────────
+  function setFilter(f, el) {
+    activeFilter = f;
+    document.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+    el.classList.add('active');
+    render();
+  }
+
+  function getFiltered() {
+    const q = (document.getElementById('searchInput')?.value || '').toLowerCase();
+    return devices.filter(d => {
+      const matchFilter =
+        activeFilter === 'all'                                    ? true :
+        activeFilter === 'notebook' || activeFilter === 'desktop' ? d.type === activeFilter :
+        d.status === activeFilter;
+      const matchSearch = !q ||
+        (d.name  ||'').toLowerCase().includes(q) ||
+        (d.user  ||'').toLowerCase().includes(q) ||
+        (d.setor ||'').toLowerCase().includes(q);
+      return matchFilter && matchSearch;
+    });
+  }
+
+  // ── Modal ─────────────────────────────────────────────
+  function openModal() {
+    document.getElementById('modalOverlay').classList.add('open');
+    document.getElementById('f_contact').value = toISO(new Date().toLocaleDateString('pt-BR'));
+    selectType('notebook');
+  }
+  function closeModal() {
+    document.getElementById('modalOverlay').classList.remove('open');
+    resetForm();
+  }
+  function handleOverlayClick(e) {
+    if (e.target === document.getElementById('modalOverlay')) closeModal();
+  }
+  function selectType(t) {
+    selectedType = t;
+    document.getElementById('btnNotebook').classList.toggle('active', t==='notebook');
+    document.getElementById('btnDesktop').classList.toggle('active', t==='desktop');
+  }
+  function resetForm() {
+    ['f_name','f_user','f_setor','f_brand','f_model','f_notes'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('f_os').value = '';
+    document.getElementById('f_managed').value = 'Unknown';
+    document.getElementById('f_exposure').value = '';
+    document.getElementById('f_lastupdate').value = '';
+    document.getElementById('f_contact').value = '';
+  }
+
+  // ── Helpers ───────────────────────────────────────────
+  function toISO(br) {
+    if (!br) return '';
+    if (br.includes('-')) return br;
+    const [d,m,y] = br.split('/');
+    return y&&m&&d ? `${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}` : '';
+  }
+  function fromISO(iso) {
+    if (!iso) return '';
+    const [y,m,d] = iso.split('-');
+    return `${d}/${m}/${y}`;
+  }
+  function isoDate() { return new Date().toISOString().slice(0,10); }
+  function setStatus(msg) {
+    document.getElementById('statusBar').style.display = 'block';
+    document.getElementById('statusBar').textContent = msg;
+  }
+  function hideStatus() { document.getElementById('statusBar').style.display = 'none'; }
+
+  // ── Render ────────────────────────────────────────────
+  function renderSummary() {
+    const c = { pending:0, progress:0, done:0, failed:0 };
+    devices.forEach(d => c[d.status]++);
+    const nb = devices.filter(d => d.type==='notebook').length;
+    const dt = devices.filter(d => d.type==='desktop').length;
+    document.getElementById('summaryBar').innerHTML = `
+      <div class="metric"><div class="metric-num">${devices.length}</div><div class="metric-lbl">Total</div></div>
+      <div class="metric"><div class="metric-num" style="color:var(--info)">${nb}</div><div class="metric-lbl">Notebooks</div></div>
+      <div class="metric"><div class="metric-num" style="color:#4A2080">${dt}</div><div class="metric-lbl">Desktops</div></div>
+      <div class="metric m-done"><div class="metric-num">${c.done}</div><div class="metric-lbl">Concluídos</div></div>
+      <div class="metric m-progress"><div class="metric-num">${c.progress}</div><div class="metric-lbl">Andamento</div></div>
+      <div class="metric m-failed"><div class="metric-num">${c.failed}</div><div class="metric-lbl">Falha</div></div>
+    `;
+  }
+
+  function renderCards() {
+    const el = document.getElementById('cardsContainer');
+    const list = getFiltered();
+    if (!list.length) { el.innerHTML = '<div class="empty">Nenhum equipamento encontrado.</div>'; return; }
+    el.innerHTML = list.map(d => {
+      const st = STATUS_MAP[d.status] || STATUS_MAP.pending;
+      const checks = d.checks || {};
+      const dc  = TASKS.filter(t => checks[t.key]).length;
+      const pct = Math.round(dc / TASKS.length * 100);
+      const typeChip   = d.type==='notebook' ? `<span class="chip chip-notebook">💻 Notebook</span>` : `<span class="chip chip-desktop">🖥️ Desktop</span>`;
+      const intuneChip = d.managedBy==='Intune' ? `<span class="chip chip-intune">Intune ✓</span>` : `<span class="chip chip-unknown">Intune: ${d.managedBy||'?'}</span>`;
+      const expChip    = d.exposure==='High' ? `<span class="chip chip-high">Exposure High</span>` : d.exposure ? `<span class="chip" style="background:#f5f5f5;color:#666">${d.exposure}</span>` : '';
+      const checkRows  = TASKS.map(t => `
+        <label class="check-row ${checks[t.key]?'done':''}">
+          <input type="checkbox" ${checks[t.key]?'checked':''} onchange="window._toggle('${d._id}','${t.key}')" />
+          ${t.label}
+        </label>`).join('');
+      const opts = Object.entries(STATUS_MAP).map(([k,v]) => `<option value="${k}" ${d.status===k?'selected':''}>${v.label}</option>`).join('');
+      const modelStr = [d.brand, d.model].filter(Boolean).join(' ');
+      return `
+      <div class="card">
+        <div class="card-head">
+          <div>
+            <div class="card-title">${d.name} ${typeChip}</div>
+            <div class="card-user">${d.user}</div>
+            <div class="card-meta">
+              ${d.setor  ? `<span>${d.setor}</span>` : ''}
+              ${modelStr ? `<span>· ${modelStr}</span>` : ''}
+              ${d.os     ? `<span>· ${d.os}</span>` : ''}
+              ${intuneChip} ${expChip}
+              ${d.lastUpdate ? `<span style="color:#aaa">Últ. update: ${d.lastUpdate}</span>` : ''}
+            </div>
+            <div class="progress-bar-wrap"><div class="progress-bar-fill" style="width:${pct}%"></div></div>
+          </div>
+          <button class="remove-btn" onclick="window._remove('${d._id}')">✕</button>
+        </div>
+        <div class="card-body">
+          <div class="card-section">
+            <div class="section-label">1º Contato</div>
+            <input type="date" value="${toISO(d.firstContact)}" onchange="window._contact('${d._id}',this.value)" />
+            ${d.firstContact
+              ? `<div style="font-family:var(--mono);font-size:11px;color:var(--muted);margin-top:4px;">${d.firstContact}</div>`
+              : `<div class="no-contact">não registrado</div>`}
+          </div>
+          <div class="card-section">
+            <div class="section-label">Checklist (${dc}/${TASKS.length})</div>
+            <div class="check-group">${checkRows}</div>
+          </div>
+          <div class="card-section">
+            <div class="section-label">Status</div>
+            <div><span class="status-badge ${st.cls}">${st.label}</span></div>
+            <select onchange="window._status('${d._id}',this.value)">${opts}</select>
+          </div>
+          <div class="card-section card-notes">
+            <div class="section-label">Observações</div>
+            <textarea placeholder="Anote o que aconteceu..." onblur="window._notes('${d._id}',this.value)">${d.notes||''}</textarea>
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  function render() { renderSummary(); renderCards(); }
+
+  // ── Exportações ───────────────────────────────────────
+  function exportReport() {
+    const now = new Date().toLocaleString('pt-BR');
+    const c = { pending:0, progress:0, done:0, failed:0 };
+    devices.forEach(d => c[d.status]++);
+    const nb = devices.filter(d=>d.type==='notebook').length;
+    const dt = devices.filter(d=>d.type==='desktop').length;
+    const lines = [
+      '# Relatório de Atualização de Equipamentos — SEGEPRES / SETID',
+      `**Gerado em:** ${now}`, '',
+      `| Métrica | Valor |`, `|---|---|`,
+      `| Total | ${devices.length} |`, `| Notebooks | ${nb} |`, `| Desktops | ${dt} |`,
+      `| Concluídos | ${c.done} |`, `| Em andamento | ${c.progress} |`,
+      `| Pendentes | ${c.pending} |`, `| Com falha | ${c.failed} |`,
+      '', '---', '',
+    ];
+    devices.forEach(d => {
+      const checks = d.checks || {};
+      lines.push(`## [${d.type==='notebook'?'NB':'DT'}] ${d.name} — ${d.user}`);
+      lines.push(`- **Tipo:** ${d.type==='notebook'?'Notebook':'Desktop'}`);
+      lines.push(`- **Setor:** ${d.setor||'-'}`);
+      lines.push(`- **Modelo:** ${[d.brand,d.model].filter(Boolean).join(' ')||'-'}`);
+      lines.push(`- **Sistema atual:** ${d.os||'-'}`);
+      lines.push(`- **Gerenciado por:** ${d.managedBy||'-'}`);
+      lines.push(`- **Último update:** ${d.lastUpdate||'-'}`);
+      lines.push(`- **Primeiro contato:** ${d.firstContact||'não registrado'}`);
+      lines.push(`- **Status:** ${STATUS_MAP[d.status]?.label||d.status}`);
+      lines.push('');
+      TASKS.forEach(t => lines.push(`- [${checks[t.key]?'x':' '}] ${t.label}`));
+      if (d.notes) lines.push(`\n**Observações:** ${d.notes}`);
+      lines.push('', '---', '');
+    });
+    download(lines.join('\n'), `relatorio_equipamentos_${isoDate()}.md`, 'text/markdown');
+  }
+
+  function exportCSV() {
+    const h = 'Tipo,Patrimônio,Usuário,Setor,Fabricante,Modelo,SO,Gerenciado por,Exposure,Primeiro Contato,Status,Backup avisado,Win11,Intune,Winget,Observações';
+    const rows = devices.map(d => {
+      const ch = d.checks||{};
+      return [
+        d.type==='notebook'?'Notebook':'Desktop', d.name, d.user, d.setor, d.brand, d.model,
+        d.os, d.managedBy, d.exposure, d.firstContact,
+        STATUS_MAP[d.status]?.label||d.status,
+        ch.warned?'Sim':'Não', ch.win11?'Sim':'Não', ch.intune?'Sim':'Não', ch.winget?'Sim':'Não',
+        `"${(d.notes||'').replace(/"/g,'""')}"`
+      ].join(',');
+    });
+    download([h,...rows].join('\n'), `equipamentos_${isoDate()}.csv`, 'text/csv');
+  }
+
+  function download(content, filename, type) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([content], { type }));
+    a.download = filename;
+    a.click();
+  }
+
+  // ── Expor funções para o HTML (onclick) ───────────────
+  window._toggle  = toggleCheck;
+  window._remove  = removeDevice;
+  window._status  = setDeviceStatus;
+  window._notes   = saveNotes;
+  window._contact = setContact;
+  window.openModal        = openModal;
+  window.closeModal       = closeModal;
+  window.handleOverlayClick = handleOverlayClick;
+  window.selectType       = selectType;
+  window.addDevice        = addDevice;
+  window.setFilter        = setFilter;
+  window.exportReport     = exportReport;
+  window.exportCSV        = exportCSV;
+  window.render           = render;
+</script>
+
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap');
+  :root {
+    --bg:#F4F2ED; --surface:#FFFFFF; --border:#D8D4CC;
+    --text:#1A1917; --muted:#706D66;
+    --accent:#2C5F2E; --accent-light:#EAF2EA;
+    --warn:#7A3B00; --warn-light:#FFF0E0;
+    --danger:#7A1F1F; --danger-light:#FDE8E8;
+    --info:#1A3A5C; --info-light:#E4EEF8;
+    --mono:'IBM Plex Mono',monospace;
+    --sans:'IBM Plex Sans',sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:var(--sans);background:var(--bg);color:var(--text);min-height:100vh;padding:2rem;}
+
+  /* Status bar */
+  #statusBar{display:none;background:var(--info-light);color:var(--info);font-size:13px;padding:10px 16px;border-radius:8px;margin-bottom:1rem;border:1px solid #B8D0E8;}
+
+  header{display:flex;align-items:flex-start;justify-content:space-between;flex-wrap:wrap;gap:1rem;margin-bottom:2rem;padding-bottom:1.5rem;border-bottom:1.5px solid var(--border);}
+  .header-left h1{font-family:var(--mono);font-size:20px;font-weight:500;letter-spacing:-0.02em;margin-bottom:4px;}
+  .header-left p{font-size:13px;color:var(--muted);}
+  .firebase-badge{font-size:11px;font-family:var(--mono);background:#FFF3E0;color:#E65100;border:1px solid #FFCC80;padding:3px 10px;border-radius:20px;margin-top:4px;display:inline-block;}
+
+  .summary-bar{display:flex;gap:10px;flex-wrap:wrap;}
+  .metric{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:10px 16px;min-width:78px;text-align:center;}
+  .metric-num{font-family:var(--mono);font-size:22px;font-weight:500;line-height:1;}
+  .metric-lbl{font-size:10px;color:var(--muted);margin-top:3px;text-transform:uppercase;letter-spacing:0.06em;}
+  .metric.m-progress .metric-num{color:var(--info);}
+  .metric.m-done .metric-num{color:var(--accent);}
+  .metric.m-failed .metric-num{color:var(--danger);}
+
+  .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:100;align-items:center;justify-content:center;}
+  .modal-overlay.open{display:flex;}
+  .modal{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:28px;width:100%;max-width:520px;max-height:90vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,0.18);}
+  .modal h2{font-family:var(--mono);font-size:16px;font-weight:500;margin-bottom:20px;}
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+  .form-grid .full{grid-column:1 / -1;}
+  .field{display:flex;flex-direction:column;gap:5px;}
+  .field label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.06em;color:var(--muted);}
+  .field input,.field select,.field textarea{font-family:var(--sans);font-size:13px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);outline:none;transition:border-color .15s;}
+  .field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent);}
+  .field textarea{resize:vertical;min-height:60px;}
+  .modal-footer{display:flex;gap:8px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--border);}
+
+  .type-toggle{display:flex;gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-bottom:20px;}
+  .type-btn{flex:1;padding:10px;font-family:var(--sans);font-size:13px;font-weight:500;border:none;background:var(--bg);color:var(--muted);cursor:pointer;transition:all .15s;display:flex;align-items:center;justify-content:center;gap:6px;}
+  .type-btn.active{background:var(--text);color:#fff;}
+  .type-btn:first-child{border-right:1px solid var(--border);}
+
+  .filter-bar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:1.2rem;align-items:center;}
+  .filter-chip{font-family:var(--sans);font-size:12px;padding:6px 14px;border-radius:20px;border:1px solid var(--border);background:var(--surface);color:var(--muted);cursor:pointer;transition:all .15s;}
+  .filter-chip.active{background:var(--text);color:#fff;border-color:var(--text);}
+  .search-input{font-family:var(--sans);font-size:13px;padding:6px 12px;border:1px solid var(--border);border-radius:20px;background:var(--surface);color:var(--text);outline:none;min-width:200px;transition:border-color .15s;}
+  .search-input:focus{border-color:var(--accent);}
+
+  .btn{font-family:var(--sans);font-size:13px;font-weight:500;padding:8px 16px;border-radius:6px;border:1px solid var(--border);background:var(--text);color:#fff;cursor:pointer;transition:opacity .15s;white-space:nowrap;}
+  .btn:hover{opacity:.85;}
+  .btn.secondary{background:var(--surface);color:var(--text);}
+  .btn.danger{background:var(--danger);border-color:var(--danger);color:#fff;}
+  .btn.accent{background:var(--accent);border-color:var(--accent);color:#fff;}
+
+  .cards{display:flex;flex-direction:column;gap:12px;}
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:box-shadow .15s;}
+  .card:hover{box-shadow:0 2px 12px rgba(0,0,0,.06);}
+  .card-head{display:grid;grid-template-columns:1fr auto;align-items:start;gap:12px;padding:14px 16px 10px;border-bottom:1px solid var(--border);background:#FAFAF8;}
+  .card-title{font-family:var(--mono);font-size:14px;font-weight:500;display:flex;align-items:center;gap:8px;}
+  .card-user{font-size:13px;color:var(--muted);margin-top:2px;}
+  .card-meta{font-size:11px;color:var(--muted);margin-top:4px;display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+  .chip{display:inline-block;font-size:10px;font-weight:500;padding:2px 7px;border-radius:20px;border:1px solid transparent;font-family:var(--mono);}
+  .chip-intune{background:var(--accent-light);color:var(--accent);border-color:#C0D9C1;}
+  .chip-unknown{background:var(--warn-light);color:var(--warn);border-color:#F0D5B0;}
+  .chip-high{background:var(--danger-light);color:var(--danger);border-color:#F5C5C5;}
+  .chip-notebook{background:var(--info-light);color:var(--info);border-color:#B8D0E8;}
+  .chip-desktop{background:#F3EEF8;color:#4A2080;border-color:#D0BEE8;}
+
+  .card-body{display:grid;grid-template-columns:1fr 1fr 180px 1fr;}
+  @media(max-width:850px){.card-body{grid-template-columns:1fr 1fr;}.card-notes{grid-column:1 / -1;}}
+  @media(max-width:500px){.card-body{grid-template-columns:1fr;}}
+  .card-section{padding:12px 16px;border-right:1px solid var(--border);}
+  .card-section:last-child{border-right:none;}
+  .section-label{font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:0.07em;color:var(--muted);margin-bottom:8px;}
+
+  input[type=date]{font-family:var(--mono);font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);outline:none;width:100%;cursor:pointer;}
+  input[type=date]:focus{border-color:var(--accent);}
+  .no-contact{font-size:11px;color:var(--muted);font-style:italic;margin-top:4px;}
+  .check-group{display:flex;flex-direction:column;gap:7px;}
+  .check-row{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text);cursor:pointer;user-select:none;}
+  .check-row input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent);cursor:pointer;flex-shrink:0;}
+  .check-row.done{color:var(--muted);text-decoration:line-through;}
+  .status-badge{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:500;padding:4px 10px;border-radius:20px;margin-bottom:8px;}
+  .badge-pending{background:var(--warn-light);color:var(--warn);}
+  .badge-progress{background:var(--info-light);color:var(--info);}
+  .badge-done{background:var(--accent-light);color:var(--accent);}
+  .badge-failed{background:var(--danger-light);color:var(--danger);}
+  select{font-family:var(--sans);font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);outline:none;width:100%;cursor:pointer;}
+  select:focus{border-color:var(--accent);}
+  textarea{font-family:var(--sans);font-size:12px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);resize:vertical;width:100%;min-height:60px;outline:none;}
+  textarea:focus{border-color:var(--accent);}
+  .remove-btn{background:none;border:none;cursor:pointer;color:var(--muted);font-size:18px;padding:4px 8px;border-radius:4px;line-height:1;transition:background .1s,color .1s;}
+  .remove-btn:hover{background:var(--danger-light);color:var(--danger);}
+  .footer-bar{display:flex;gap:10px;margin-top:1.5rem;flex-wrap:wrap;}
+  .empty{text-align:center;padding:3rem;color:var(--muted);font-size:14px;background:var(--surface);border:1px dashed var(--border);border-radius:12px;}
+  .progress-bar-wrap{height:3px;background:var(--border);border-radius:2px;margin-top:8px;overflow:hidden;}
+  .progress-bar-fill{height:100%;background:var(--accent);border-radius:2px;transition:width .3s;}
+</style>
+</head>
+<body>
+
+<div id="statusBar">⏳ Conectando ao Firebase...</div>
+
+<header>
+  <div class="header-left">
+    <h1>// tracker · equipamentos</h1>
+    <p>SEGEPRES / SETID — Win11 + Intune + Winget</p>
+    <span class="firebase-badge">🔥 Firebase Realtime</span>
+  </div>
+  <div class="summary-bar" id="summaryBar"></div>
+</header>
+
+<div class="filter-bar">
+  <button class="btn accent" onclick="openModal()">+ Novo equipamento</button>
+  <span style="width:1px;height:28px;background:var(--border);display:inline-block;margin:0 4px;"></span>
+  <button class="filter-chip active" onclick="setFilter('all',this)">Todos</button>
+  <button class="filter-chip" onclick="setFilter('notebook',this)">💻 Notebooks</button>
+  <button class="filter-chip" onclick="setFilter('desktop',this)">🖥️ Desktops</button>
+  <button class="filter-chip" onclick="setFilter('pending',this)">Pendentes</button>
+  <button class="filter-chip" onclick="setFilter('progress',this)">Em andamento</button>
+  <button class="filter-chip" onclick="setFilter('done',this)">Concluídos</button>
+  <input class="search-input" type="text" id="searchInput" placeholder="🔍  Buscar patrimônio ou usuário..." oninput="render()" />
+</div>
+
+<div class="cards" id="cardsContainer">
+  <div class="empty">⏳ Aguardando dados do Firebase...</div>
+</div>
+
+<div class="footer-bar">
+  <button class="btn secondary" onclick="exportReport()">↓ Exportar relatório (.md)</button>
+  <button class="btn secondary" onclick="exportCSV()">↓ Exportar CSV</button>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modalOverlay" onclick="handleOverlayClick(event)">
+  <div class="modal">
+    <h2>// cadastrar equipamento</h2>
+    <div class="type-toggle">
+      <button class="type-btn active" id="btnNotebook" onclick="selectType('notebook')">💻 Notebook</button>
+      <button class="type-btn" id="btnDesktop" onclick="selectType('desktop')">🖥️ Desktop</button>
+    </div>
+    <div class="form-grid">
+      <div class="field full"><label>Patrimônio *</label><input type="text" id="f_name" placeholder="E-000000" /></div>
+      <div class="field full"><label>Nome do usuário *</label><input type="text" id="f_user" placeholder="Nome completo" /></div>
+      <div class="field full"><label>Setor</label><input type="text" id="f_setor" placeholder="SETID / DIREC / SESUC" /></div>
+      <div class="field"><label>Fabricante</label><input type="text" id="f_brand" placeholder="ex: Dell, HP, Positivo" /></div>
+      <div class="field"><label>Modelo</label><input type="text" id="f_model" placeholder="ex: EliteBook 840 G3" /></div>
+      <div class="field"><label>Sistema atual</label>
+        <select id="f_os">
+          <option value="">Desconhecido</option>
+          <option value="Windows 10">Windows 10</option>
+          <option value="Windows 11">Windows 11</option>
+          <option value="Outro">Outro</option>
+        </select>
+      </div>
+      <div class="field"><label>Gerenciado por</label>
+        <select id="f_managed">
+          <option value="Unknown">Desconhecido</option>
+          <option value="Intune">Intune</option>
+          <option value="AD">Active Directory</option>
+          <option value="Nenhum">Nenhum</option>
+        </select>
+      </div>
+      <div class="field"><label>Exposure</label>
+        <select id="f_exposure">
+          <option value="">Nenhuma</option>
+          <option value="High">High</option>
+          <option value="Medium">Medium</option>
+          <option value="Low">Low</option>
+        </select>
+      </div>
+      <div class="field"><label>Último update</label><input type="date" id="f_lastupdate" /></div>
+      <div class="field full"><label>Data do 1º contato</label><input type="date" id="f_contact" /></div>
+      <div class="field full"><label>Observações iniciais</label><textarea id="f_notes" placeholder="Contexto, urgência, localização..."></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn secondary" onclick="closeModal()">Cancelar</button>
+      <button class="btn accent" onclick="addDevice()">Cadastrar</button>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>
